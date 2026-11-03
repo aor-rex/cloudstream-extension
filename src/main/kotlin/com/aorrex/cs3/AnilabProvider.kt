@@ -97,19 +97,19 @@ class AnilabProvider : MainAPI() {
                 val num = e.opt("number")?.toString()
                     ?: e.opt("episode")?.toString()
                     ?: (i + 1).toString()
-                episodes += newEpisode("$url|$num", fix = false) {
+                episodes += newEpisode(url = "$url|$num", fix = false, initializer = {
                     name = "Episode $num"
                     episode = num.toIntOrNull()
-                }
+                })
             }
         } else {
             val total = o.optInt("totalEpisodes",
                 o.optInt("episodesCount", o.optInt("episodes", 0)))
             for (n in 1..total) {
-                episodes += newEpisode("$url|$n", fix = false) {
+                episodes += newEpisode(url = "$url|$n", fix = false, initializer = {
                     name = "Episode $n"
                     episode = n
-                }
+                })
             }
         }
 
