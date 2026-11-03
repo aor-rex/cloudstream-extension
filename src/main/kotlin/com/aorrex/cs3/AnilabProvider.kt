@@ -125,6 +125,16 @@ class AnilabProvider : MainAPI() {
                 })
             }
         } catch (_: Exception) { }
+        if (episodes.isEmpty()) {
+            try {
+                for ((i, line) in Kyoto.probe(id).withIndex()) {
+                    episodes += newEpisode(url = "probe|$i", fix = false, initializer = {
+                        name = line.take(140)
+                        episode = i + 1
+                    })
+                }
+            } catch (_: Exception) { }
+        }
 
         val recs = mutableListOf<SearchResponse>()
         val seas = o.optJSONArray("seasons") ?: JSONArray()
@@ -159,6 +169,7 @@ class AnilabProvider : MainAPI() {
         val (epId, srvId) = data.split("|").let {
             if (it.size >= 2) it[0] to it[1] else it[0] to ""
         }
+        if (epId == "probe") return false
         val links = Kyoto.loadLinksForEpisode(epId, srvId, subtitleCallback)
         links.forEach(callback)
         return links.isNotEmpty()
@@ -242,6 +253,67 @@ object Kyoto {
         } catch (_: Exception) {
             null
         }
+    }
+
+    /** DIAGNOSTIC probe: tries signature variants, returns one line per attempt.
+     *  Each line is shown as an episode name so results are visible on-device. */
+    suspend fun probe(postId: String): List<String> {
+        val lines = mutableListOf<String>()
+        val ts = (System.currentTimeMillis() / 1000 + skewSec).toString()
+        val n = nonce()
+        val emptyHashLower = sha256Hex(ByteArray(0))
+        val emptyHashUpper = emptyHashLower.uppercase(Locale.US)
+        var idx = 0
+        for (upper in listOf(false, true)) {
+            for (withCert in listOf(false, true)) {
+                for (method in listOf("POST", "GET")) {
+                    idx++
+                    val bh = if (upper) emptyHashUpper else emptyHashLower
+                    val msg = "$method\nepisodes\n$bh\n$ts\n$n\n$VER"
+                    val mac = Mac.getInstance("HmacSHA256")
+                    mac.init(SecretKeySpec(innerKey, "HmacSHA256"))
+                    val sig = mac.doFinal(msg.toByteArray()).joinToString("") { "%02x".format(it) }
+                    val headers = mutableMapOf(
+                        "Accept" to "application/json",
+                        "os-version" to android.os.Build.VERSION.SDK_INT.toString(),
+                        "app-id" to APP_ID,
+                        "app-version" to VER,
+                        "device-model" to (android.os.Build.MODEL ?: "Android"),
+                        "X-Kyoto-Ts" to ts,
+                        "X-Kyoto-Nonce" to n,
+                        "X-Kyoto-Sig" to sig
+                    )
+                    if (withCert) {
+                        headers["X-Kyoto-Cert"] = ""
+                        headers["X-Kyoto-Cert-Error"] = "library_not_loaded"
+                    }
+                    val tag = "v$idx ${if (upper) "UP" else "lo"}${if (withCert) "+ct" else ""} $method"
+                    try {
+                        val res = if (method == "POST") {
+                            app.post(
+                                "$BASE/episodes?id=$postId",
+                                headers = headers,
+                                requestBody = ByteArray(0).toRequestBody()
+                            )
+                        } else {
+                            app.get("$BASE/episodes?id=$postId", headers = headers)
+                        }
+                        syncClock(res.headers["Date"] ?: res.headers["date"])
+                        val t = res.text
+                        val shape = try {
+                            val o = JSONObject(t)
+                            "keys=" + o.keys().asSequence().joinToString(",")
+                        } catch (_: Exception) {
+                            "non-json"
+                        }
+                        lines += "$tag => ${res.code} ${t.take(90)} [$shape]"
+                    } catch (e: Exception) {
+                        lines += "$tag => EX ${e.message?.take(80)}"
+                    }
+                }
+            }
+        }
+        return lines
     }
 
     /** episodes for an anilab post id. returns list of (epId, name, number, servers). */
