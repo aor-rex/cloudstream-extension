@@ -1,6 +1,5 @@
 package com.aorrex.cs3
 
-import android.util.Base64
 import com.lagradost.cloudstream3.Episode
 import com.lagradost.cloudstream3.HomePageList
 import com.lagradost.cloudstream3.HomePageResponse
@@ -18,6 +17,7 @@ import com.lagradost.cloudstream3.newAnimeSearchResponse
 import com.lagradost.cloudstream3.newEpisode
 import com.lagradost.cloudstream3.newHomePageResponse
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.Qualities
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -26,6 +26,7 @@ import org.json.JSONObject
 import java.security.SecureRandom
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
+import java.util.Locale
 
 class AnilabProvider : MainAPI() {
     override var mainUrl = "https://anilab2.amdapi.click/api"
@@ -113,6 +114,15 @@ class AnilabProvider : MainAPI() {
             .ifBlank { o.optString("synopsis") }.ifBlank { null }
 
         val episodes = mutableListOf<Episode>()
+        try {
+            for (ep in Kyoto.episodes(id)) {
+                val srv = ep.servers.firstOrNull()?.id ?: ""
+                episodes += newEpisode(url = "${ep.id}|$srv", fix = false, initializer = {
+                    name = ep.name
+                    episode = ep.number.toIntOrNull()
+                })
+            }
+        } catch (_: Exception) { }
 
         val recs = mutableListOf<SearchResponse>()
         val seas = o.optJSONArray("seasons") ?: JSONArray()
@@ -124,28 +134,8 @@ class AnilabProvider : MainAPI() {
                 this.posterUrl = posterOf(s)
             }
         }
-        val epArr = pickArray(o, "episodes", "episodeList", "eps")
-        if (epArr != null) {
-            for (i in 0 until epArr.length()) {
-                val e = epArr.optJSONObject(i) ?: continue
-                val num = e.opt("number")?.toString()
-                    ?: e.opt("episode")?.toString()
-                    ?: (i + 1).toString()
-                episodes += newEpisode(url = "$id|$num", fix = false, initializer = {
-                    name = "Episode $num"
-                    episode = num.toIntOrNull()
-                })
-            }
-        } else {
-            val total = o.optInt("totalEpisodes",
-                o.optInt("episodesCount", o.optInt("episodes", 0)))
-            for (n in 1..total) {
-                episodes += newEpisode(url = "$id|$n", fix = false, initializer = {
-                    name = "Episode $n"
-                    episode = n
-                })
-            }
-        }
+        // Fallback: anilab /post carries no episode data, so if the signed
+        // call above yields nothing the list stays empty until Kyoto works.
 
         return newAnimeLoadResponse(title, url, TvType.Anime) {
             this.posterUrl = poster
@@ -164,24 +154,32 @@ class AnilabProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val (id, ep) = data.split("|").let {
-            if (it.size >= 2) it[0] to it[1] else it[0] to "1"
+        val (epId, srvId) = data.split("|").let {
+            if (it.size >= 2) it[0] to it[1] else it[0] to ""
         }
-        val links = Kyoto.loadLinksForEpisode(id, ep)
+        val links = Kyoto.loadLinksForEpisode(epId, srvId, subtitleCallback)
         links.forEach(callback)
         return links.isNotEmpty()
     }
 }
 
 /**
- * Pure-Kotlin port of the KYOTO Player request signer (no native lib needed).
- * Key de-obfuscation: byte[i] XOR ((i * 73 + 41) & 0xFF), same as libkyoto.so.
- * Msg: METHOD + "\n" + PATH + "\n" + sha256(body) + "\n" + ts + "\n" + nonce + "\n" + VER
+ * Pure-Kotlin port of the KYOTO Player 1.3.2 request signer (Ln8::b + NativeSigner),
+ * reversed from the user-supplied APK. No native lib needed.
+ *
+ * msg = METHOD_UPPER + "\n" + PATH(no query) + "\n" + sha256hex(body, lowercase)
+ *       + "\n" + tsSeconds + "\n" + nonce + "\n132"
+ * nonce = standard-base64(16 random bytes) with trailing '=' stripped (NOT url-safe).
+ * ts = unix seconds, synced to server clock via response Date headers (AtomicLong in app).
+ * X-Kyoto-Cert is omitted (null on devices without the KYOTO package signature).
  */
 object Kyoto {
     private const val APP_ID = "com.kyotoplayer"
     private const val VER = "132"
+    private const val BASE = "https://api.kyotoplayer.com"
     private const val OBF_HEX = "bcfb0102a27d4623de59016fcd8a511ff459d73f1671c2d2d7f1d2115e043308"
+
+    @Volatile private var skewSec: Long = 0L
 
     private val innerKey: ByteArray by lazy {
         val obf = OBF_HEX.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
@@ -195,30 +193,120 @@ object Kyoto {
         return d.joinToString("") { "%02x".format(it) }
     }
 
-    fun signedHeaders(method: String, path: String, body: ByteArray = ByteArray(0)): Map<String, String> {
-        val ts = (System.currentTimeMillis() / 1000).toString()
-        val nonceBytes = ByteArray(16).also { SecureRandom().nextBytes(it) }
-        val nonce = Base64.encodeToString(nonceBytes, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
-        val msg = "$method\n$path\n${sha256Hex(body)}\n$ts\n$nonce\n$VER"
+    fun syncClock(dateHeader: String?) {
+        if (dateHeader == null) return
+        try {
+            val fmt = java.text.SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss zzz", Locale.US)
+            fmt.timeZone = java.util.TimeZone.getTimeZone("GMT")
+            fmt.isLenient = false
+            val serverSec = fmt.parse(dateHeader)?.time?.div(1000) ?: return
+            val localSec = System.currentTimeMillis() / 1000
+            skewSec = serverSec - localSec
+        } catch (_: Exception) { }
+    }
+
+    private fun nonce(): String {
+        val raw = ByteArray(16).also { SecureRandom().nextBytes(it) }
+        return android.util.Base64.encodeToString(
+            raw, android.util.Base64.NO_WRAP
+        ).trimEnd('=')
+    }
+
+    suspend fun post(path: String, query: String = "", body: ByteArray = ByteArray(0)): JSONObject? {
+        val ts = (System.currentTimeMillis() / 1000 + skewSec).toString()
+        val n = nonce()
+        val msg = "POST\n$path\n${sha256Hex(body)}\n$ts\n$n\n$VER"
         val mac = Mac.getInstance("HmacSHA256")
         mac.init(SecretKeySpec(innerKey, "HmacSHA256"))
         val sig = mac.doFinal(msg.toByteArray()).joinToString("") { "%02x".format(it) }
-        return mapOf(
+        val headers = mapOf(
             "Accept" to "application/json",
-            "os-version" to "34",
+            "os-version" to android.os.Build.VERSION.SDK_INT.toString(),
             "app-id" to APP_ID,
             "app-version" to VER,
-            "device-model" to "Android",
+            "device-model" to (android.os.Build.MODEL ?: "Android"),
             "X-Kyoto-Ts" to ts,
-            "X-Kyoto-Nonce" to nonce,
+            "X-Kyoto-Nonce" to n,
             "X-Kyoto-Sig" to sig
         )
+        return try {
+            val res = app.post(BASE + path + query, headers = headers, data = body)
+            syncClock(res.headers["Date"] ?: res.headers["date"])
+            JSONObject(res.text)
+        } catch (_: Exception) {
+            null
+        }
     }
 
-    suspend fun loadLinksForEpisode(id: String, ep: String): List<ExtractorLink> {
-        // episodes -> servers -> stream, then parse m3u8 qualities.
-        // Endpoints still being locked against the live server; returns
-        // empty until the signed handshake is confirmed.
-        return emptyList()
+    /** episodes for an anilab post id. returns list of (epId, name, number, servers). */
+    suspend fun episodes(postId: String): List<EpInfo> {
+        val root = post("episodes", "?id=$postId") ?: return emptyList()
+        val arr = root.optJSONArray("list") ?: return emptyList()
+        val out = mutableListOf<EpInfo>()
+        for (i in 0 until arr.length()) {
+            val e = arr.optJSONObject(i) ?: continue
+            val eid = e.optString("id").ifBlank { continue }
+            val srv = mutableListOf<SrvInfo>()
+            val sa = e.optJSONArray("servers") ?: JSONArray()
+            for (j in 0 until sa.length()) {
+                val s = sa.optJSONObject(j) ?: continue
+                val sid = s.optString("id").ifBlank { continue }
+                srv += SrvInfo(sid, s.optString("name"), s.optString("lang"))
+            }
+            out += EpInfo(
+                eid,
+                e.optString("name").ifBlank { "Episode ${e.optString("number").ifBlank { (i + 1).toString() }}" },
+                e.optString("number"),
+                srv
+            )
+        }
+        return out
     }
+
+    /** stream link for a server id. */
+    suspend fun stream(serverId: String, episodeId: String = ""): StreamInfo? {
+        val q = if (episodeId.isNotBlank()) "?id=$serverId&episode=$episodeId" else "?id=$serverId"
+        val root = post("stream", q) ?: return null
+        val link = root.optString("link").ifBlank { return null }
+        val subs = mutableListOf<SubtitleFile>()
+        val sa = root.optJSONArray("subtitles") ?: JSONArray()
+        for (i in 0 until sa.length()) {
+            val s = sa.optJSONObject(i) ?: continue
+            val url = s.optString("url").ifBlank { s.optString("link") }.ifBlank { continue }
+            subs += SubtitleFile(s.optString("lang").ifBlank { s.optString("name") }, url)
+        }
+        val hdrs = mutableListOf<Pair<String, String>>()
+        val va = root.optJSONArray("videoHeaders") ?: JSONArray()
+        for (i in 0 until va.length()) {
+            val h = va.optJSONObject(i) ?: continue
+            val k = h.optString("key").ifBlank { h.optString("name") }
+            val v = h.optString("value").ifBlank { h.optString("url") }
+            if (k.isNotBlank() && v.isNotBlank()) hdrs += k to v
+        }
+        return StreamInfo(link, subs, hdrs)
+    }
+
+    suspend fun loadLinksForEpisode(
+        epId: String,
+        serverId: String,
+        subtitleCallback: (SubtitleFile) -> Unit
+    ): List<ExtractorLink> {
+        val st = stream(serverId, epId) ?: return emptyList()
+        st.subs.forEach(subtitleCallback)
+        val out = mutableListOf<ExtractorLink>()
+        out += ExtractorLink(
+            "Anilab",
+            "Kyoto",
+            st.link,
+            "",
+            Qualities.Unknown.value,
+            headers = st.headers.toMap(),
+            extractorData = null
+        )
+        return out
+    }
+
+    data class EpInfo(val id: String, val name: String, val number: String, val servers: List<SrvInfo>)
+    data class SrvInfo(val id: String, val name: String, val lang: String)
+    data class StreamInfo(val link: String, val subs: List<SubtitleFile>, val headers: List<Pair<String, String>>)
 }
