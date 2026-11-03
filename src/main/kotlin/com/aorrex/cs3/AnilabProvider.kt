@@ -8,6 +8,7 @@ import com.lagradost.cloudstream3.LoadResponse
 import com.lagradost.cloudstream3.MainAPI
 import com.lagradost.cloudstream3.MainPageRequest
 import com.lagradost.cloudstream3.SearchResponse
+import com.lagradost.cloudstream3.Score
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.addEpisodes
@@ -151,7 +152,7 @@ class AnilabProvider : MainAPI() {
             this.plot = plot
             this.tags = o.optString("genres").split(",").map { it.trim() }.filter { it.isNotEmpty() }
             this.year = premieredYear(o.optString("premiered"))
-            this.score = o.opt("score")?.toString()?.toDoubleOrNull()?.div(2.0)?.toFloat()
+            this.score = Score.from10(o.opt("score")?.toString()?.toDoubleOrNull())
             if (recs.isNotEmpty()) this.recommendations = recs
             addEpisodes(com.lagradost.cloudstream3.DubStatus.Subbed, episodes)
         }
