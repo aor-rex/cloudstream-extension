@@ -17,6 +17,7 @@ import com.lagradost.cloudstream3.newAnimeSearchResponse
 import com.lagradost.cloudstream3.newEpisode
 import com.lagradost.cloudstream3.newHomePageResponse
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.apmap
 import org.json.JSONArray
 import org.json.JSONObject
 import java.security.SecureRandom
@@ -43,10 +44,16 @@ class AnilabProvider : MainAPI() {
     private fun posterOf(o: JSONObject): String? =
         o.optString("poster").ifBlank { o.optString("image") }.ifBlank { null }
 
-    private fun asSearch(o: JSONObject): SearchResponse? {
+    private suspend fun hydrate(o: JSONObject): SearchResponse? {
         val id = o.opt("id")?.toString() ?: return null
-        return newAnimeSearchResponse(titleOf(o), id) {
-            this.posterUrl = posterOf(o)
+        val poster = posterOf(o)
+        val title = try {
+            titleOf(postObj(id)).ifBlank { null }
+        } catch (_: Exception) {
+            null
+        } ?: return null
+        return newAnimeSearchResponse(title, id) {
+            this.posterUrl = poster
         }
     }
 
@@ -66,7 +73,8 @@ class AnilabProvider : MainAPI() {
             val s = sections.optJSONObject(i) ?: continue
             val posts = s.optJSONArray("posts") ?: continue
             val items = (0 until posts.length())
-                .mapNotNull { posts.optJSONObject(it)?.let(::asSearch) }
+                .mapNotNull { posts.optJSONObject(it) }
+                .apmap { hydrate(it) }.filterNotNull()
             if (items.isNotEmpty()) {
                 lists += HomePageList(s.optString("name", "Featured"), items)
             }
@@ -76,18 +84,19 @@ class AnilabProvider : MainAPI() {
 
     override suspend fun search(query: String): List<SearchResponse> {
         val root = JSONObject(app.get("$mainUrl/search?query=$query").text)
-        val arr = pickArray(root, "posts", "results", "data")
-            ?: if (root.length() > 0 && root.optJSONObject("0") == null) null else null
-        val list = arr ?: JSONArray() // search returns object with posts array
-        return (0 until list.length())
-            .mapNotNull { list.optJSONObject(it)?.let(::asSearch) }
+        val arr = pickArray(root, "posts", "results", "data") ?: JSONArray()
+        return (0 until arr.length())
+            .mapNotNull { arr.optJSONObject(it) }
+            .apmap { hydrate(it) }.filterNotNull()
     }
 
     override suspend fun load(url: String): LoadResponse {
         val o = postObj(url)
         val title = titleOf(o)
         val poster = posterOf(o)
-        val plot = o.optString("description").ifBlank { o.optString("synopsis") }.ifBlank { null }
+        val plot = o.optString("overview")
+            .ifBlank { o.optString("description") }
+            .ifBlank { o.optString("synopsis") }.ifBlank { null }
 
         val episodes = mutableListOf<Episode>()
         val epArr = pickArray(o, "episodes", "episodeList", "eps")
