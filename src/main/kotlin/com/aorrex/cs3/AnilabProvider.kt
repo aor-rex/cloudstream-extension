@@ -53,6 +53,9 @@ class AnilabProvider : MainAPI() {
             }
         }
 
+    private fun premieredYear(premiered: String): Int? =
+        Regex("""(19|20)\d{2}""").find(premiered)?.value?.toIntOrNull()
+
     private suspend fun hydrate(o: JSONObject): SearchResponse? {
         val id = o.opt("id")?.toString() ?: return null
         val poster = posterOf(o)
@@ -109,6 +112,17 @@ class AnilabProvider : MainAPI() {
             .ifBlank { o.optString("synopsis") }.ifBlank { null }
 
         val episodes = mutableListOf<Episode>()
+
+        val recs = mutableListOf<SearchResponse>()
+        val seas = o.optJSONArray("seasons") ?: JSONArray()
+        for (i in 0 until seas.length()) {
+            val s = seas.optJSONObject(i) ?: continue
+            val sid = s.opt("id")?.toString() ?: continue
+            val stitle = s.optString("title").ifBlank { continue }
+            recs += newAnimeSearchResponse(stitle, sid, fix = false) {
+                this.posterUrl = posterOf(s)
+            }
+        }
         val epArr = pickArray(o, "episodes", "episodeList", "eps")
         if (epArr != null) {
             for (i in 0 until epArr.length()) {
@@ -135,6 +149,10 @@ class AnilabProvider : MainAPI() {
         return newAnimeLoadResponse(title, url, TvType.Anime) {
             this.posterUrl = poster
             this.plot = plot
+            this.tags = o.optString("genres").split(",").map { it.trim() }.filter { it.isNotEmpty() }
+            this.year = premieredYear(o.optString("premiered"))
+            this.score = o.opt("score")?.toString()?.toDoubleOrNull()?.div(2.0)?.toFloat()
+            if (recs.isNotEmpty()) this.recommendations = recs
             addEpisodes(com.lagradost.cloudstream3.DubStatus.Subbed, episodes)
         }
     }
