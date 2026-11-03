@@ -17,7 +17,9 @@ import com.lagradost.cloudstream3.newAnimeSearchResponse
 import com.lagradost.cloudstream3.newEpisode
 import com.lagradost.cloudstream3.newHomePageResponse
 import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.apmap
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import org.json.JSONArray
 import org.json.JSONObject
 import java.security.SecureRandom
@@ -44,6 +46,13 @@ class AnilabProvider : MainAPI() {
     private fun posterOf(o: JSONObject): String? =
         o.optString("poster").ifBlank { o.optString("image") }.ifBlank { null }
 
+    private suspend fun <A, B> Iterable<A>.pmap(f: suspend (A) -> B): List<B> =
+        coroutineScope {
+            toList().chunked(25).flatMap { chunk ->
+                chunk.map { async { f(it) } }.awaitAll()
+            }
+        }
+
     private suspend fun hydrate(o: JSONObject): SearchResponse? {
         val id = o.opt("id")?.toString() ?: return null
         val poster = posterOf(o)
@@ -52,7 +61,7 @@ class AnilabProvider : MainAPI() {
         } catch (_: Exception) {
             null
         } ?: return null
-        return newAnimeSearchResponse(title, id) {
+        return newAnimeSearchResponse(title, id, fix = false) {
             this.posterUrl = poster
         }
     }
@@ -74,7 +83,7 @@ class AnilabProvider : MainAPI() {
             val posts = s.optJSONArray("posts") ?: continue
             val items = (0 until posts.length())
                 .mapNotNull { posts.optJSONObject(it) }
-                .apmap { hydrate(it) }.filterNotNull()
+                .pmap { hydrate(it) }.filterNotNull()
             if (items.isNotEmpty()) {
                 lists += HomePageList(s.optString("name", "Featured"), items)
             }
@@ -87,11 +96,12 @@ class AnilabProvider : MainAPI() {
         val arr = pickArray(root, "posts", "results", "data") ?: JSONArray()
         return (0 until arr.length())
             .mapNotNull { arr.optJSONObject(it) }
-            .apmap { hydrate(it) }.filterNotNull()
+            .pmap { hydrate(it) }.filterNotNull()
     }
 
     override suspend fun load(url: String): LoadResponse {
-        val o = postObj(url)
+        val id = url.substringAfterLast("/").substringAfter("id=")
+        val o = postObj(id)
         val title = titleOf(o)
         val poster = posterOf(o)
         val plot = o.optString("overview")
@@ -106,7 +116,7 @@ class AnilabProvider : MainAPI() {
                 val num = e.opt("number")?.toString()
                     ?: e.opt("episode")?.toString()
                     ?: (i + 1).toString()
-                episodes += newEpisode(url = "$url|$num", fix = false, initializer = {
+                episodes += newEpisode(url = "$id|$num", fix = false, initializer = {
                     name = "Episode $num"
                     episode = num.toIntOrNull()
                 })
@@ -115,7 +125,7 @@ class AnilabProvider : MainAPI() {
             val total = o.optInt("totalEpisodes",
                 o.optInt("episodesCount", o.optInt("episodes", 0)))
             for (n in 1..total) {
-                episodes += newEpisode(url = "$url|$n", fix = false, initializer = {
+                episodes += newEpisode(url = "$id|$n", fix = false, initializer = {
                     name = "Episode $n"
                     episode = n
                 })

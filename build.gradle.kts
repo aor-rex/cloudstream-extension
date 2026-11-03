@@ -37,7 +37,7 @@ fun Project.android(configuration: BaseExtension.() -> Unit) =
 
 // Single standalone extension. If your github repo is not
 // aor-rex/cloudstream-extension, change the fallback below.
-version = 2
+version = 3
 
 cloudstream {
     setRepo(System.getenv("GITHUB_REPOSITORY") ?: "aor-rex/cloudstream-extension")
@@ -81,6 +81,7 @@ dependencies {
     cloudstream("com.lagradost:cloudstream3:pre-release")
 
     implementation(kotlin("stdlib"))
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
     implementation("com.github.Blatzar:NiceHttp:0.4.11")
     implementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.13.1")
 }
