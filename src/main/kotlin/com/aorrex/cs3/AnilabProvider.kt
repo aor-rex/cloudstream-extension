@@ -170,11 +170,7 @@ object Kyoto {
         )
     }
 
-    suspend fun loadLinksForEpisode(
-        id: String,
-        ep: String,
-        subtitleCallback: (SubtitleFile) -> Unit = {}
-    ): List<ExtractorLink> {
+    suspend fun loadLinksForEpisode(id: String, ep: String): List<ExtractorLink> {
         // episodes -> servers -> stream, then parse m3u8 qualities.
         // Endpoints still being locked against the live server; returns
         // empty until the signed handshake is confirmed.
