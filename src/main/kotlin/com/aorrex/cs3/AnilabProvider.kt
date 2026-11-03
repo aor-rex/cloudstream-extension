@@ -10,12 +10,13 @@ import com.lagradost.cloudstream3.MainPageRequest
 import com.lagradost.cloudstream3.SearchResponse
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.TvType
+import com.lagradost.cloudstream3.addEpisodes
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.newAnimeLoadResponse
 import com.lagradost.cloudstream3.newAnimeSearchResponse
+import com.lagradost.cloudstream3.newEpisode
 import com.lagradost.cloudstream3.newHomePageResponse
 import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.Qualities
 import org.json.JSONArray
 import org.json.JSONObject
 import java.security.SecureRandom
@@ -29,7 +30,7 @@ class AnilabProvider : MainAPI() {
     override var lang = "en"
     override val hasMainPage = true
 
-    private fun postObj(id: String): JSONObject =
+    private suspend fun postObj(id: String): JSONObject =
         JSONObject(app.get("$mainUrl/post?id=$id").text)
 
     private fun titleOf(o: JSONObject): String =
@@ -96,13 +97,19 @@ class AnilabProvider : MainAPI() {
                 val num = e.opt("number")?.toString()
                     ?: e.opt("episode")?.toString()
                     ?: (i + 1).toString()
-                episodes += Episode("$url|$num", "Episode $num", episode = num.toIntOrNull())
+                episodes += newEpisode("$url|$num", fix = false) {
+                    name = "Episode $num"
+                    episode = num.toIntOrNull()
+                }
             }
         } else {
             val total = o.optInt("totalEpisodes",
                 o.optInt("episodesCount", o.optInt("episodes", 0)))
             for (n in 1..total) {
-                episodes += Episode("$url|$n", "Episode $n", episode = n)
+                episodes += newEpisode("$url|$n", fix = false) {
+                    name = "Episode $n"
+                    episode = n
+                }
             }
         }
 
