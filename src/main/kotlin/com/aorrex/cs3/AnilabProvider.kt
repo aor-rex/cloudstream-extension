@@ -18,9 +18,11 @@ import com.lagradost.cloudstream3.newEpisode
 import com.lagradost.cloudstream3.newHomePageResponse
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
+import com.lagradost.cloudstream3.utils.newExtractorLink
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.security.SecureRandom
@@ -230,7 +232,11 @@ object Kyoto {
             "X-Kyoto-Sig" to sig
         )
         return try {
-            val res = app.post(BASE + path + query, headers = headers, data = body)
+            val res = app.post(
+                BASE + path + query,
+                headers = headers,
+                requestBody = body.toRequestBody()
+            )
             syncClock(res.headers["Date"] ?: res.headers["date"])
             JSONObject(res.text)
         } catch (_: Exception) {
@@ -294,15 +300,11 @@ object Kyoto {
         val st = stream(serverId, epId) ?: return emptyList()
         st.subs.forEach(subtitleCallback)
         val out = mutableListOf<ExtractorLink>()
-        out += ExtractorLink(
-            "Anilab",
-            "Kyoto",
-            st.link,
-            "",
-            Qualities.Unknown.value,
-            headers = st.headers.toMap(),
-            extractorData = null
-        )
+        out += newExtractorLink("Anilab", "Kyoto", st.link) {
+            this.referer = ""
+            this.quality = Qualities.Unknown.value
+            this.headers = st.headers.toMap()
+        }
         return out
     }
 
