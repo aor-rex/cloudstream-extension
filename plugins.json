@@ -1,0 +1,21 @@
+[
+    {
+        "fileHash": "sha256-8eee3b508bd1a43dda63921e440dec26b65c12aeb1e909aec66288a5e9bc1be4",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/aor-rex/cloudstream-extension",
+        "fileSize": 30592,
+        "status": 1,
+        "language": "en",
+        "authors": [
+            "aor-rex"
+        ],
+        "tvTypes": [
+            "Anime"
+        ],
+        "version": 11,
+        "internalName": "cs3-anilab",
+        "description": "Anilab catalog + Kyoto streams",
+        "url": "https://cdn.jsdelivr.net/gh/aor-rex/cloudstream-extension@builds/cs3-anilab.cs3",
+        "name": "cs3-anilab"
+    }
+]

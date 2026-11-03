@@ -1,0 +1,8 @@
+{
+    "name": "aor-rex extensions",
+    "description": "Anilab catalog + Kyoto streams",
+    "manifestVersion": 1,
+    "pluginLists": [
+      "https://cdn.jsdelivr.net/gh/aor-rex/cloudstream-extension@builds/plugins.json"
+    ]
+}
