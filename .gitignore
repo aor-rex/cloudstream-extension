@@ -1,0 +1,7 @@
+*.cs3
+build/
+.gradle/
+local.properties
+.idea/
+*.iml
+.DS_Store
