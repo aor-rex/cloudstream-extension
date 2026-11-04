@@ -177,9 +177,9 @@ class AnilabProvider : MainAPI() {
 }
 
 /**
- * Pure-Kotlin port of the KYOTO Player 1.3.2 request signer, from decompiled Ln8::b.
- * Signed message is just: METHOD_UPPER + "\n" + "132"  (no path, no body hash, no ts).
- * ts/nonce ride as plaintext headers; server validates freshness separately.
+ * Pure-Kotlin port of the KYOTO Player 1.3.2 request signer, from Ln8::b bytecode.
+ * Signed message: HOSTPATH(no scheme/query) + "\n" + sha256hex(body, lower)
+ * + "\n" + ts + "\n" + nonce + "\n132". ts/nonce plaintext headers.
  * Sig = nativeSign(msg) = double-HMAC-SHA256 (see nativeSign), lowercase hex.
  * INNER = OBF xor ((i*73+41) & 0xFF), same as libkyoto.so.
  */
@@ -244,7 +244,9 @@ object Kyoto {
     suspend fun post(path: String, query: String = "", body: ByteArray = ByteArray(0)): JSONObject? {
         val ts = (System.currentTimeMillis() / 1000 + skewSec).toString()
         val n = nonce()
-        val sigs = sigVariants("POST")
+        // Exact Ln8::b recipe: host+path (no scheme, no query) + body-hash + ts + nonce + ver.
+        val msg = "api.kyotoplayer.com/$path\n${sha256Hex(body)}\n$ts\n$n\n$VER"
+        val sig = nativeSign(msg)
         val headers = mutableMapOf(
             "Accept" to "application/json",
             "os-version" to android.os.Build.VERSION.SDK_INT.toString(),
@@ -253,22 +255,14 @@ object Kyoto {
             "device-model" to (android.os.Build.MODEL ?: "Android"),
             "X-Kyoto-Ts" to ts,
             "X-Kyoto-Nonce" to n,
-            "X-Kyoto-Sig" to sigs[0]
+            "X-Kyoto-Sig" to sig
         )
         return try {
-            var res = app.post(
+            val res = app.post(
                 BASE + path + query,
                 headers = headers,
                 requestBody = body.toRequestBody()
             )
-            if (res.code == 401) {
-                headers["X-Kyoto-Sig"] = sigs[1]
-                res = app.post(
-                    BASE + path + query,
-                    headers = headers,
-                    requestBody = body.toRequestBody()
-                )
-            }
             syncClock(res.headers["Date"] ?: res.headers["date"])
             JSONObject(res.text)
         } catch (_: Exception) {
@@ -276,50 +270,50 @@ object Kyoto {
         }
     }
 
-    /** DIAGNOSTIC probe: tries the decompiled msg (METHOD + VER) with lower/upper
-     *  sig hex, with/without cert headers. One line per attempt, shown on-device. */
+    /** DIAGNOSTIC probe: exact Ln8::b recipe, fresh ts+nonce per attempt,
+     *  with/without cert headers. One line per attempt, shown on-device. */
     suspend fun probe(postId: String): List<String> {
         val lines = mutableListOf<String>()
-        val ts = (System.currentTimeMillis() / 1000 + skewSec).toString()
-        val n = nonce()
-        val sigs = sigVariants("POST")
         var idx = 0
-        for (si in 0..1) {
-            for (withCert in listOf(false, true)) {
-                idx++
-                val headers = mutableMapOf(
-                    "Accept" to "application/json",
-                    "os-version" to android.os.Build.VERSION.SDK_INT.toString(),
-                    "app-id" to APP_ID,
-                    "app-version" to VER,
-                    "device-model" to (android.os.Build.MODEL ?: "Android"),
-                    "X-Kyoto-Ts" to ts,
-                    "X-Kyoto-Nonce" to n,
-                    "X-Kyoto-Sig" to sigs[si]
+        for (withCert in listOf(false, true)) {
+            idx++
+            val ts = (System.currentTimeMillis() / 1000 + skewSec).toString()
+            val n = nonce()
+            val body = ByteArray(0)
+            val msg = "api.kyotoplayer.com/episodes\n${sha256Hex(body)}\n$ts\n$n\n$VER"
+            val sig = nativeSign(msg)
+            val headers = mutableMapOf(
+                "Accept" to "application/json",
+                "os-version" to android.os.Build.VERSION.SDK_INT.toString(),
+                "app-id" to APP_ID,
+                "app-version" to VER,
+                "device-model" to (android.os.Build.MODEL ?: "Android"),
+                "X-Kyoto-Ts" to ts,
+                "X-Kyoto-Nonce" to n,
+                "X-Kyoto-Sig" to sig
+            )
+            if (withCert) {
+                headers["X-Kyoto-Cert"] = ""
+                headers["X-Kyoto-Cert-Error"] = "library_not_loaded"
+            }
+            val tag = "y$idx ${if (withCert) "+ct" else "plain"}"
+            try {
+                val res = app.post(
+                    "$BASE/episodes?id=$postId",
+                    headers = headers,
+                    requestBody = body.toRequestBody()
                 )
-                if (withCert) {
-                    headers["X-Kyoto-Cert"] = ""
-                    headers["X-Kyoto-Cert-Error"] = "library_not_loaded"
+                syncClock(res.headers["Date"] ?: res.headers["date"])
+                val t = res.text
+                val shape = try {
+                    val o = JSONObject(t)
+                    "keys=" + o.keys().asSequence().joinToString(",")
+                } catch (_: Exception) {
+                    "non-json"
                 }
-                val tag = "x$idx ${if (si == 0) "dbl" else "sng"}${if (withCert) "+ct" else ""}"
-                try {
-                    val res = app.post(
-                        "$BASE/episodes?id=$postId",
-                        headers = headers,
-                        requestBody = ByteArray(0).toRequestBody()
-                    )
-                    syncClock(res.headers["Date"] ?: res.headers["date"])
-                    val t = res.text
-                    val shape = try {
-                        val o = JSONObject(t)
-                        "keys=" + o.keys().asSequence().joinToString(",")
-                    } catch (_: Exception) {
-                        "non-json"
-                    }
-                    lines += "$tag => ${res.code} ${t.take(100)} [$shape]"
-                } catch (e: Exception) {
-                    lines += "$tag => EX ${e.message?.take(80)}"
-                }
+                lines += "$tag => ${res.code} ${t.take(120)} [$shape]"
+            } catch (e: Exception) {
+                lines += "$tag => EX ${e.message?.take(80)}"
             }
         }
         return lines
