@@ -233,6 +233,35 @@ object Kyoto {
         return m2.doFinal(msg.toByteArray()).joinToString("") { "%02x".format(it) }
     }
 
+    private fun hmac(key: ByteArray, data: ByteArray): String {
+        val m = Mac.getInstance("HmacSHA256")
+        m.init(SecretKeySpec(key, "HmacSHA256"))
+        return m.doFinal(data).joinToString("") { "%02x".format(it) }
+    }
+
+    /** Candidate sigs for the on-device probe (server 403s datacenter IPs,
+     *  so only the phone can test). */
+    private fun sigCandidates(msg: String): List<Pair<String, String>> {
+        val mb = msg.toByteArray()
+        val d1 = Mac.getInstance("HmacSHA256").also {
+            it.init(SecretKeySpec(innerKey, "HmacSHA256"))
+        }.doFinal(mb)
+        val shaMsg = MessageDigest.getInstance("SHA-256").digest(mb)
+        return listOf(
+            "dbl" to hmac(d1, mb),
+            "sng" to hmac(innerKey, mb),
+            "hmacInnerSha" to hmac(innerKey, shaMsg),
+            "hmacShaInner" to hmac(
+                MessageDigest.getInstance("SHA-256").digest(innerKey), mb),
+            "hmacMsg32" to hmac(mb.copyOf(32), mb),
+            "dblTrailNL" to hmac(
+                Mac.getInstance("HmacSHA256").also {
+                    it.init(SecretKeySpec(innerKey, "HmacSHA256"))
+                }.doFinal((msg + "\n").toByteArray()),
+                (msg + "\n").toByteArray())
+        )
+    }
+
     private fun sigVariants(methodUpper: String): List<String> {
         val msg = "$methodUpper\n$VER"
         val mac = Mac.getInstance("HmacSHA256")
@@ -270,18 +299,21 @@ object Kyoto {
         }
     }
 
-    /** DIAGNOSTIC probe: exact Ln8::b recipe, fresh ts+nonce per attempt,
-     *  with/without cert headers. One line per attempt, shown on-device. */
+    /** DIAGNOSTIC probe: 6 sig candidates, fresh ts+nonce per attempt.
+     *  One line per attempt, shown on-device. */
     suspend fun probe(postId: String): List<String> {
         val lines = mutableListOf<String>()
+        val body = ByteArray(0)
+        // NOTE: msg ts/nonce must match the headers; rebuild per attempt.
         var idx = 0
-        for (withCert in listOf(false, true)) {
+        // build one msg per attempt inside the loop via helper below
+        for ((tag, _) in listOf("dbl" to 0, "sng" to 0, "hmacInnerSha" to 0,
+                "hmacShaInner" to 0, "hmacMsg32" to 0, "dblTrailNL" to 0)) {
             idx++
             val ts = (System.currentTimeMillis() / 1000 + skewSec).toString()
             val n = nonce()
-            val body = ByteArray(0)
             val msg = "api.kyotoplayer.com/episodes\n${sha256Hex(body)}\n$ts\n$n\n$VER"
-            val sig = nativeSign(msg)
+            val sig = sigCandidates(msg).first { it.first == tag }.second
             val headers = mutableMapOf(
                 "Accept" to "application/json",
                 "os-version" to android.os.Build.VERSION.SDK_INT.toString(),
@@ -292,11 +324,6 @@ object Kyoto {
                 "X-Kyoto-Nonce" to n,
                 "X-Kyoto-Sig" to sig
             )
-            if (withCert) {
-                headers["X-Kyoto-Cert"] = ""
-                headers["X-Kyoto-Cert-Error"] = "library_not_loaded"
-            }
-            val tag = "y$idx ${if (withCert) "+ct" else "plain"}"
             try {
                 val res = app.post(
                     "$BASE/episodes?id=$postId",
@@ -311,9 +338,9 @@ object Kyoto {
                 } catch (_: Exception) {
                     "non-json"
                 }
-                lines += "$tag => ${res.code} ${t.take(120)} [$shape]"
+                lines += "z$idx $tag => ${res.code} ${t.take(120)} [$shape]"
             } catch (e: Exception) {
-                lines += "$tag => EX ${e.message?.take(80)}"
+                lines += "z$idx $tag => EX ${e.message?.take(80)}"
             }
         }
         return lines
