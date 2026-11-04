@@ -180,7 +180,7 @@ class AnilabProvider : MainAPI() {
  * Pure-Kotlin port of the KYOTO Player 1.3.2 request signer, from decompiled Ln8::b.
  * Signed message is just: METHOD_UPPER + "\n" + "132"  (no path, no body hash, no ts).
  * ts/nonce ride as plaintext headers; server validates freshness separately.
- * Sig = nativeSign(msg) = HMAC-SHA256(INNER, msg); hex case tried both ways.
+ * Sig = nativeSign(msg) = double-HMAC-SHA256 (see nativeSign), lowercase hex.
  * INNER = OBF xor ((i*73+41) & 0xFF), same as libkyoto.so.
  */
 object Kyoto {
@@ -222,12 +222,23 @@ object Kyoto {
         ).trimEnd('=')
     }
 
+    /** Exact replica of nativeSign @0x134f0: double HMAC-SHA256, lowercase hex.
+     *  d1 = HMAC(INNER, msg); sig = HMAC(d1, msg). */
+    private fun nativeSign(msg: String): String {
+        val m1 = Mac.getInstance("HmacSHA256")
+        m1.init(SecretKeySpec(innerKey, "HmacSHA256"))
+        val d1 = m1.doFinal(msg.toByteArray())
+        val m2 = Mac.getInstance("HmacSHA256")
+        m2.init(SecretKeySpec(d1, "HmacSHA256"))
+        return m2.doFinal(msg.toByteArray()).joinToString("") { "%02x".format(it) }
+    }
+
     private fun sigVariants(methodUpper: String): List<String> {
         val msg = "$methodUpper\n$VER"
         val mac = Mac.getInstance("HmacSHA256")
         mac.init(SecretKeySpec(innerKey, "HmacSHA256"))
-        val lower = mac.doFinal(msg.toByteArray()).joinToString("") { "%02x".format(it) }
-        return listOf(lower, lower.uppercase(Locale.US))
+        val single = mac.doFinal(msg.toByteArray()).joinToString("") { "%02x".format(it) }
+        return listOf(nativeSign(msg), single)
     }
 
     suspend fun post(path: String, query: String = "", body: ByteArray = ByteArray(0)): JSONObject? {
@@ -290,7 +301,7 @@ object Kyoto {
                     headers["X-Kyoto-Cert"] = ""
                     headers["X-Kyoto-Cert-Error"] = "library_not_loaded"
                 }
-                val tag = "w$idx ${if (si == 0) "lo" else "UP"}${if (withCert) "+ct" else ""}"
+                val tag = "x$idx ${if (si == 0) "dbl" else "sng"}${if (withCert) "+ct" else ""}"
                 try {
                     val res = app.post(
                         "$BASE/episodes?id=$postId",
