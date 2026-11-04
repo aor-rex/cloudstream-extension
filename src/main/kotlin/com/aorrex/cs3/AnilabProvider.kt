@@ -177,14 +177,11 @@ class AnilabProvider : MainAPI() {
 }
 
 /**
- * Pure-Kotlin port of the KYOTO Player 1.3.2 request signer (Ln8::b + NativeSigner),
- * reversed from the user-supplied APK. No native lib needed.
- *
- * msg = METHOD_UPPER + "\n" + PATH(no query) + "\n" + sha256hex(body, lowercase)
- *       + "\n" + tsSeconds + "\n" + nonce + "\n132"
- * nonce = standard-base64(16 random bytes) with trailing '=' stripped (NOT url-safe).
- * ts = unix seconds, synced to server clock via response Date headers (AtomicLong in app).
- * X-Kyoto-Cert is omitted (null on devices without the KYOTO package signature).
+ * Pure-Kotlin port of the KYOTO Player 1.3.2 request signer, from decompiled Ln8::b.
+ * Signed message is just: METHOD_UPPER + "\n" + "132"  (no path, no body hash, no ts).
+ * ts/nonce ride as plaintext headers; server validates freshness separately.
+ * Sig = nativeSign(msg) = HMAC-SHA256(INNER, msg); hex case tried both ways.
+ * INNER = OBF xor ((i*73+41) & 0xFF), same as libkyoto.so.
  */
 object Kyoto {
     private const val APP_ID = "com.kyotoplayer"
@@ -225,14 +222,19 @@ object Kyoto {
         ).trimEnd('=')
     }
 
+    private fun sigVariants(methodUpper: String): List<String> {
+        val msg = "$methodUpper\n$VER"
+        val mac = Mac.getInstance("HmacSHA256")
+        mac.init(SecretKeySpec(innerKey, "HmacSHA256"))
+        val lower = mac.doFinal(msg.toByteArray()).joinToString("") { "%02x".format(it) }
+        return listOf(lower, lower.uppercase(Locale.US))
+    }
+
     suspend fun post(path: String, query: String = "", body: ByteArray = ByteArray(0)): JSONObject? {
         val ts = (System.currentTimeMillis() / 1000 + skewSec).toString()
         val n = nonce()
-        val msg = "POST\n$path\n${sha256Hex(body)}\n$ts\n$n\n$VER"
-        val mac = Mac.getInstance("HmacSHA256")
-        mac.init(SecretKeySpec(innerKey, "HmacSHA256"))
-        val sig = mac.doFinal(msg.toByteArray()).joinToString("") { "%02x".format(it) }
-        val headers = mapOf(
+        val sigs = sigVariants("POST")
+        val headers = mutableMapOf(
             "Accept" to "application/json",
             "os-version" to android.os.Build.VERSION.SDK_INT.toString(),
             "app-id" to APP_ID,
@@ -240,14 +242,22 @@ object Kyoto {
             "device-model" to (android.os.Build.MODEL ?: "Android"),
             "X-Kyoto-Ts" to ts,
             "X-Kyoto-Nonce" to n,
-            "X-Kyoto-Sig" to sig
+            "X-Kyoto-Sig" to sigs[0]
         )
         return try {
-            val res = app.post(
+            var res = app.post(
                 BASE + path + query,
                 headers = headers,
                 requestBody = body.toRequestBody()
             )
+            if (res.code == 401) {
+                headers["X-Kyoto-Sig"] = sigs[1]
+                res = app.post(
+                    BASE + path + query,
+                    headers = headers,
+                    requestBody = body.toRequestBody()
+                )
+            }
             syncClock(res.headers["Date"] ?: res.headers["date"])
             JSONObject(res.text)
         } catch (_: Exception) {
@@ -255,61 +265,49 @@ object Kyoto {
         }
     }
 
-    /** DIAGNOSTIC probe: tries signature variants, returns one line per attempt.
-     *  Each line is shown as an episode name so results are visible on-device. */
+    /** DIAGNOSTIC probe: tries the decompiled msg (METHOD + VER) with lower/upper
+     *  sig hex, with/without cert headers. One line per attempt, shown on-device. */
     suspend fun probe(postId: String): List<String> {
         val lines = mutableListOf<String>()
         val ts = (System.currentTimeMillis() / 1000 + skewSec).toString()
         val n = nonce()
-        val emptyHashLower = sha256Hex(ByteArray(0))
-        val emptyHashUpper = emptyHashLower.uppercase(Locale.US)
+        val sigs = sigVariants("POST")
         var idx = 0
-        for (upper in listOf(false, true)) {
+        for (si in 0..1) {
             for (withCert in listOf(false, true)) {
-                for (method in listOf("POST", "GET")) {
-                    idx++
-                    val bh = if (upper) emptyHashUpper else emptyHashLower
-                    val msg = "$method\nepisodes\n$bh\n$ts\n$n\n$VER"
-                    val mac = Mac.getInstance("HmacSHA256")
-                    mac.init(SecretKeySpec(innerKey, "HmacSHA256"))
-                    val sig = mac.doFinal(msg.toByteArray()).joinToString("") { "%02x".format(it) }
-                    val headers = mutableMapOf(
-                        "Accept" to "application/json",
-                        "os-version" to android.os.Build.VERSION.SDK_INT.toString(),
-                        "app-id" to APP_ID,
-                        "app-version" to VER,
-                        "device-model" to (android.os.Build.MODEL ?: "Android"),
-                        "X-Kyoto-Ts" to ts,
-                        "X-Kyoto-Nonce" to n,
-                        "X-Kyoto-Sig" to sig
+                idx++
+                val headers = mutableMapOf(
+                    "Accept" to "application/json",
+                    "os-version" to android.os.Build.VERSION.SDK_INT.toString(),
+                    "app-id" to APP_ID,
+                    "app-version" to VER,
+                    "device-model" to (android.os.Build.MODEL ?: "Android"),
+                    "X-Kyoto-Ts" to ts,
+                    "X-Kyoto-Nonce" to n,
+                    "X-Kyoto-Sig" to sigs[si]
+                )
+                if (withCert) {
+                    headers["X-Kyoto-Cert"] = ""
+                    headers["X-Kyoto-Cert-Error"] = "library_not_loaded"
+                }
+                val tag = "w$idx ${if (si == 0) "lo" else "UP"}${if (withCert) "+ct" else ""}"
+                try {
+                    val res = app.post(
+                        "$BASE/episodes?id=$postId",
+                        headers = headers,
+                        requestBody = ByteArray(0).toRequestBody()
                     )
-                    if (withCert) {
-                        headers["X-Kyoto-Cert"] = ""
-                        headers["X-Kyoto-Cert-Error"] = "library_not_loaded"
+                    syncClock(res.headers["Date"] ?: res.headers["date"])
+                    val t = res.text
+                    val shape = try {
+                        val o = JSONObject(t)
+                        "keys=" + o.keys().asSequence().joinToString(",")
+                    } catch (_: Exception) {
+                        "non-json"
                     }
-                    val tag = "v$idx ${if (upper) "UP" else "lo"}${if (withCert) "+ct" else ""} $method"
-                    try {
-                        val res = if (method == "POST") {
-                            app.post(
-                                "$BASE/episodes?id=$postId",
-                                headers = headers,
-                                requestBody = ByteArray(0).toRequestBody()
-                            )
-                        } else {
-                            app.get("$BASE/episodes?id=$postId", headers = headers)
-                        }
-                        syncClock(res.headers["Date"] ?: res.headers["date"])
-                        val t = res.text
-                        val shape = try {
-                            val o = JSONObject(t)
-                            "keys=" + o.keys().asSequence().joinToString(",")
-                        } catch (_: Exception) {
-                            "non-json"
-                        }
-                        lines += "$tag => ${res.code} ${t.take(90)} [$shape]"
-                    } catch (e: Exception) {
-                        lines += "$tag => EX ${e.message?.take(80)}"
-                    }
+                    lines += "$tag => ${res.code} ${t.take(100)} [$shape]"
+                } catch (e: Exception) {
+                    lines += "$tag => EX ${e.message?.take(80)}"
                 }
             }
         }
@@ -319,7 +317,23 @@ object Kyoto {
     /** episodes for an anilab post id. returns list of (epId, name, number, servers). */
     suspend fun episodes(postId: String): List<EpInfo> {
         val root = post("episodes", "?id=$postId") ?: return emptyList()
-        val arr = root.optJSONArray("list") ?: return emptyList()
+        var arr = root.optJSONArray("list")
+        if (arr == null) {
+            for (k in listOf("episodes", "data", "servers", "result", "items")) {
+                arr = root.optJSONArray(k)
+                if (arr != null) break
+            }
+        }
+        if (arr == null) {
+            val o = root.optJSONObject("data") ?: root.optJSONObject("result")
+            if (o != null) {
+                for (k in listOf("list", "episodes", "servers", "items")) {
+                    arr = o.optJSONArray(k)
+                    if (arr != null) break
+                }
+            }
+        }
+        if (arr == null) return emptyList()
         val out = mutableListOf<EpInfo>()
         for (i in 0 until arr.length()) {
             val e = arr.optJSONObject(i) ?: continue
