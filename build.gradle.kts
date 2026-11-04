@@ -37,7 +37,7 @@ fun Project.android(configuration: BaseExtension.() -> Unit) =
 
 // Single standalone extension. If your github repo is not
 // aor-rex/cloudstream-extension, change the fallback below.
-version = 10
+version = 11
 
 cloudstream {
     setRepo(System.getenv("GITHUB_REPOSITORY") ?: "aor-rex/cloudstream-extension")

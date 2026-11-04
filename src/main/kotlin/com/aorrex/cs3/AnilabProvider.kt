@@ -234,6 +234,10 @@ object Kyoto {
         return m2.doFinal(msg.toByteArray()).joinToString("") { "%02x".format(it) }
     }
 
+    /** nativeCertificate @0x138d0: hex(INNER), lowercase. Static, same every run. */
+    private fun cert(): String =
+        innerKey.joinToString("") { "%02x".format(it) }
+
     private fun hmac(key: ByteArray, data: ByteArray): String {
         val m = Mac.getInstance("HmacSHA256")
         m.init(SecretKeySpec(key, "HmacSHA256"))
@@ -285,7 +289,8 @@ object Kyoto {
             "device-model" to (android.os.Build.MODEL ?: "Android"),
             "X-Kyoto-Ts" to ts,
             "X-Kyoto-Nonce" to n,
-            "X-Kyoto-Sig" to sig
+            "X-Kyoto-Sig" to sig,
+            "X-Kyoto-Cert" to cert()
         )
         return try {
             val res = app.post(
@@ -300,16 +305,13 @@ object Kyoto {
         }
     }
 
-    /** DIAGNOSTIC probe: 6 sig candidates, fresh ts+nonce per attempt.
-     *  One line per attempt, shown on-device. */
+    /** DIAGNOSTIC probe: 3 sig candidates, all with the REAL cert
+     *  (nativeCertificate = hex(INNER)). Fresh ts+nonce per attempt. */
     suspend fun probe(postId: String): List<String> {
         val lines = mutableListOf<String>()
         val body = ByteArray(0)
-        // NOTE: msg ts/nonce must match the headers; rebuild per attempt.
         var idx = 0
-        // build one msg per attempt inside the loop via helper below
-        for ((tag, _) in listOf("dbl" to 0, "sng" to 0, "hmacInnerSha" to 0,
-                "hmacShaInner" to 0, "hmacMsg32" to 0, "dblTrailNL" to 0)) {
+        for ((tag, _) in listOf("dbl" to 0, "sng" to 0, "hmacInnerSha" to 0)) {
             idx++
             val ts = (System.currentTimeMillis() / 1000 + skewSec).toString()
             val n = nonce()
@@ -323,7 +325,8 @@ object Kyoto {
                 "device-model" to (android.os.Build.MODEL ?: "Android"),
                 "X-Kyoto-Ts" to ts,
                 "X-Kyoto-Nonce" to n,
-                "X-Kyoto-Sig" to sig
+                "X-Kyoto-Sig" to sig,
+                "X-Kyoto-Cert" to cert()
             )
             try {
                 val res = app.post(
@@ -339,9 +342,9 @@ object Kyoto {
                 } catch (_: Exception) {
                     "non-json"
                 }
-                lines += "z$idx $tag => ${res.code} ${t.take(120)} [$shape]"
+                lines += "c$idx $tag => ${res.code} ${t.take(120)} [$shape]"
             } catch (e: Exception) {
-                lines += "z$idx $tag => EX ${e.message?.take(80)}"
+                lines += "c$idx $tag => EX ${e.message?.take(80)}"
             }
         }
         return lines
